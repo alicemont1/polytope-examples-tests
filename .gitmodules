@@ -1,0 +1,3 @@
+[submodule "polytope-examples"]
+	path = polytope-examples
+	url = git@github.com:destination-earth-digital-twins/polytope-examples.git

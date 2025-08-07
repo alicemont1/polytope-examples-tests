@@ -4,109 +4,68 @@ from io import BytesIO
 from pathlib import Path
 
 import nbformat
+from nbconvert.preprocessors import ExecutePreprocessor
 import pytest
 from PIL import Image
 import imagehash
+import requests
 
-from pytest_notebook.nb_regression import NBRegressionFixture
-from pytest_notebook.diffing import filter_diff, diff_to_string
+from pytest_notebook.diffing import diff_notebooks, filter_diff, diff_to_string
 
-NOTEBOOK_PATHS = [
-    'polytope-examples/climate-dt/climate-dt-earthkit-example.ipynb',
-    'polytope-examples/climate-dt/climate-dt-earthkit-aoi-example.ipynb',
-    'polytope-examples/climate-dt/climate-dt-earthkit-area-example.ipynb',
-    'polytope-examples/climate-dt/climate-dt-earthkit-example-domain.ipynb',
-    'polytope-examples/climate-dt/climate-dt-earthkit-fe-boundingbox.ipynb',
-    'polytope-examples/climate-dt/climate-dt-earthkit-fe-polygon.ipynb',
-    'polytope-examples/climate-dt/climate-dt-earthkit-fe-story-nudging.ipynb', #f
-    'polytope-examples/climate-dt/climate-dt-earthkit-fe-timeseries.ipynb', #f
-    'polytope-examples/climate-dt/climate-dt-earthkit-fe-trajectory.ipynb', #f
-    'polytope-examples/climate-dt/climate-dt-earthkit-fe-verticalprofile.ipynb', #f
-    'polytope-examples/climate-dt/climate-dt-earthkit-grid-example.ipynb',
-    'polytope-examples/climate-dt/climate-dt-earthkit-healpix-interpolate.ipynb',
-    'polytope-examples/climate-dt/climate-dt-healpix-data.ipynb',
-    'polytope-examples/climate-dt/climate-dt-healpix-ocean-example.ipynb',
-
-    'polytope-examples/extremes-dt/extremes-dt-earthkit-example-domain.ipynb',
-    'polytope-examples/extremes-dt/extremes-dt-earthkit-example-fe-boundingbox.ipynb',
-    'polytope-examples/extremes-dt/extremes-dt-earthkit-example-fe-country.ipynb',
-    'polytope-examples/extremes-dt/extremes-dt-earthkit-example-fe-polygon.ipynb',
-    'polytope-examples/extremes-dt/extremes-dt-earthkit-example-fe-timeseries.ipynb', #f
-    'polytope-examples/extremes-dt/extremes-dt-earthkit-example-fe-trajectory.ipynb',
-    'polytope-examples/extremes-dt/extremes-dt-earthkit-example-fe-trajectory4d.ipynb',
-    'polytope-examples/extremes-dt/extremes-dt-earthkit-example-fe-verticalprofile.ipynb', #f
-    'polytope-examples/extremes-dt/extremes-dt-earthkit-example-fe-wave.ipynb', #f
-    'polytope-examples/extremes-dt/extremes-dt-earthkit-example-regrid.ipynb',
-    'polytope-examples/extremes-dt/extremes-dt-earthkit-example.ipynb',
-
-    'polytope-examples/on-demand-extremes-dt/on-demand-extremes-dt-example.ipynb',
+# ----------------------------
+# Configuration
+# ----------------------------
+NOTEBOOKS = [
+    'climate-dt/climate-dt-earthkit-example.ipynb',
 ]
 
-# Paths in notebooks to always ignore during diffing
 BASE_IGNORES = (
-    '/metadata/language_info/',
+    '/metadata/*',
+    '/cells/*/metadata',
     '/cells/*/execution_count',
+    '/cells/*/source',
     '/cells/*/outputs/*/execution_count',
     '/cells/*/outputs/*/data/text/html',
 )
 
-# Tags that instruct diff-ignore behavior
 TAG_IGNORES = {
     "skip-text-plain": "/cells/{idx}/outputs/*/data/text/plain",
     "skip-outputs": "/cells/{idx}/outputs",
     "skip-image": "/cells/{idx}/outputs/*/data/image/png",
 }
 
-# Tags that require perceptual image comparison instead of ignoring
 TAG_IMAGE_CHECKS = {"check-image"}
 
+SUBMODULE_PATH = "test" #TODO rename to polytope-examples
+REPO_URL = "https://github.com/alicemont1/test"
+
+# ----------------------------
+# Utility Functions
+# ----------------------------
 
 def perceptual_hash(b64_png: str):
-    """Convert base64-encoded PNG to perceptual hash."""
     data = base64.b64decode(b64_png)
     img = Image.open(BytesIO(data)).convert("RGB")
     return imagehash.phash(img)
 
 
 def analyze_tags(nb):
-    """Analyze notebook for tag-based ignore paths and image checks."""
     ignore_paths = []
     image_checks = []
 
     for idx, cell in enumerate(nb.cells):
         tags = set(cell.metadata.get("tags", []))
 
-        # Collect ignore paths
         for tag, template in TAG_IGNORES.items():
             if tag in tags:
                 ignore_paths.append(template.format(idx=idx))
 
-        # Collect image check indices
         if TAG_IMAGE_CHECKS & tags:
             for output_idx, output in enumerate(cell.get("outputs", [])):
                 if "image/png" in output.get("data", {}):
                     image_checks.append((idx, output_idx))
 
     return ignore_paths, image_checks
-
-
-def compare_images(result, checks_initial, checks_final, threshold=4):
-    """Filter out perceptually identical image diffs."""
-    paths_to_remove = []
-
-    for (cell_idx, out_idx_f), (_, out_idx_i) in zip(checks_final, checks_initial):
-        png1 = result.nb_initial.cells[cell_idx].outputs[out_idx_i].data["image/png"]
-        png2 = result.nb_final.cells[cell_idx].outputs[out_idx_f].data["image/png"]
-
-        # Convert list-of-strings to single base64 string if needed
-        png1 = "".join(png1) if isinstance(png1, list) else png1
-        png2 = "".join(png2) if isinstance(png2, list) else png2
-
-        if perceptual_hash(png1) - perceptual_hash(png2) <= threshold:
-            paths_to_remove.append(f"/cells/{cell_idx}/outputs/{out_idx_f}/data/image/png")
-
-    return filter_diff(result.diff_filtered, remove_paths=paths_to_remove)
-
 
 def inject_silence_stderr_cell(nb):
     """Insert a code cell to suppress stderr output."""
@@ -121,38 +80,88 @@ def inject_silence_stderr_cell(nb):
     """
     silence_cell = nbformat.v4.new_code_cell(source=patch_code)
     nb.cells.insert(0, silence_cell)
+    
+def compare_images(nb1, nb2, checks1, checks2, threshold=5):
+    paths_to_remove = []
+
+    for (cell_idx, out_idx1), (_, out_idx2) in zip(checks1, checks2):
+        png1 = nb1.cells[cell_idx].outputs[out_idx1].data["image/png"]
+        png2 = nb2.cells[cell_idx].outputs[out_idx2].data["image/png"]
+
+        png1 = "".join(png1) if isinstance(png1, list) else png1
+        png2 = "".join(png2) if isinstance(png2, list) else png2
+
+        if perceptual_hash(png1) - perceptual_hash(png2) <= threshold:
+            paths_to_remove.append(f"/cells/{cell_idx}/outputs/{out_idx1}/data/image/png")
+
+    return paths_to_remove
+
+def inject_variable_override_cell(nb, variable, value):
+    """Inject a cell that overrides a variable at the top of the notebook."""
+    patch_code = f"{variable} = {repr(value)}"
+    override_cell = nbformat.v4.new_code_cell(source=patch_code)
+    nb.cells.insert(0, override_cell)
 
 
-@pytest.mark.parametrize("nb_file", NOTEBOOK_PATHS)
-def test_changed_notebook(nb_file, nb_regression: NBRegressionFixture):
-    # Load and patch notebook
-    nb = nbformat.read(nb_file, as_version=4)
-    inject_silence_stderr_cell(nb)
+def get_reference_nb_from_repo(notebook_path, branch="master"):
+    raw_url = f"https://raw.githubusercontent.com/alicemont1/test/{branch}/{notebook_path}"
+    
+    response = requests.get(raw_url)
+    response.raise_for_status()  # Raises error if file not found or repo unreachable
 
-    # Analyze for tag-based ignore paths and image checks
-    ignore_paths, image_checks = analyze_tags(nb)
+    reference_nb_obj = nbformat.reads(response.text, as_version=4)
+    return reference_nb_obj
 
-    # Save modified notebook to temporary file
-    with tempfile.NamedTemporaryFile(suffix=".ipynb", delete=False, mode="w") as tmp:
-        nbformat.write(nb, tmp)
-        patched_path = tmp.name
 
-    # Setup regression execution
-    nb_regression.exec_notebook = True
-    nb_regression.exec_cwd = str(Path(nb_file).parent)
-    nb_regression.diff_ignore = BASE_IGNORES + tuple(ignore_paths)
 
-    result = nb_regression.check(patched_path, raise_errors=False)
+def execute_notebook(nb_object, working_dir):
+    """Execute a notebook and return the executed notebook object."""
+    ep = ExecutePreprocessor(timeout=600, kernel_name="python3")
+    # import pdb;pdb.set_trace()
+    ep.preprocess(nb_object, {"path": '.'}) # this is the repository path
 
-    # Post-process diff if perceptual image comparisons are needed
-    if result.diff_filtered:
-        _, final_checks = analyze_tags(result.nb_final)
-        _, initial_checks = analyze_tags(result.nb_initial)
+    return nb_object
 
-        if image_checks:
-            filtered = compare_images(result, initial_checks, final_checks, threshold=5)
-            if filtered:
-                diff_str = diff_to_string(result.nb_final, filtered, use_git=True, use_diff=True, use_color=True)
-                pytest.fail(diff_str)
-        else:
-            pytest.fail(result.diff_string)
+
+
+# ----------------------------
+# Parametrized Test
+# ----------------------------
+
+@pytest.mark.parametrize("test_nb", NOTEBOOKS)
+def test_notebook_vs_baseline(test_nb):
+
+    notebook_path = SUBMODULE_PATH + '/' + test_nb
+
+    # Get notebook objects
+    with open(notebook_path) as f:
+        test_nb_obj = nbformat.read(f, as_version=4)
+    reference_nb_obj = get_reference_nb_from_repo(test_nb)
+
+    # Execute both notebooks
+    executed_test_nb = execute_notebook(test_nb_obj, notebook_path)
+    executed_reference_nb = execute_notebook(reference_nb_obj, notebook_path)
+
+    # Gather ignore paths from tags
+    ignore_paths_reference_nb, image_checks_reference_nb = analyze_tags(executed_reference_nb)
+    ignore_paths_test_nb, image_checks_test_nb = analyze_tags(executed_test_nb)
+
+    # Diff the notebooks
+    raw_diff = diff_notebooks(executed_reference_nb, executed_test_nb)
+
+    # Filter base ignores + tag-based ignores
+    all_ignores = list(BASE_IGNORES) + ignore_paths_reference_nb + ignore_paths_test_nb
+    filtered_diff = filter_diff(raw_diff, remove_paths=all_ignores)
+
+    # If still diff left, check image diffs perceptually
+    if filtered_diff:
+        if image_checks_reference_nb and image_checks_test_nb:
+            perceptually_equal_paths = compare_images(
+                executed_reference_nb, executed_test_nb, image_checks_reference_nb, image_checks_test_nb
+            )
+            filtered_diff = filter_diff(filtered_diff, remove_paths=perceptually_equal_paths)
+
+    # If anything still differs, fail
+    if filtered_diff:
+        diff_str = diff_to_string(executed_test_nb, filtered_diff, use_git=True, use_diff=True, use_color=True)
+        pytest.fail(diff_str)

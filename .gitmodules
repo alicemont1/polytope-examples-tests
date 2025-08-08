@@ -1,3 +1,6 @@
+[submodule "test"]
+	path = test
+	url = https://github.com/alicemont1/test
 [submodule "polytope-examples"]
 	path = polytope-examples
-	url = git@github.com:destination-earth-digital-twins/polytope-examples.git
+	url = https://github.com/destination-earth-digital-twins/polytope-examples

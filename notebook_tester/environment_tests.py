@@ -1,7 +1,5 @@
 import base64
-import tempfile
 from io import BytesIO
-from pathlib import Path
 
 import nbformat
 from nbconvert.preprocessors import ExecutePreprocessor
@@ -9,6 +7,8 @@ import pytest
 from PIL import Image
 import imagehash
 import requests
+import subprocess
+
 
 from pytest_notebook.diffing import diff_notebooks, filter_diff, diff_to_string
 
@@ -43,6 +43,22 @@ REPO_URL = "https://github.com/alicemont1/test"
 # Utility Functions
 # ----------------------------
 
+def get_modified_notebooks(submodule_path):
+    """Returns list of uncommitted modified .ipynb files in the given submodule."""
+    result = subprocess.run(
+        ["git", "-C", submodule_path, "status", "--porcelain"],
+        capture_output=True, check=True, text=True
+    )
+
+    notebooks = []
+    for line in result.stdout.splitlines():
+        status, path = line[:2], line[3:]
+        if path.endswith(".ipynb"):
+            notebooks.append(path)
+
+    return notebooks
+
+
 def perceptual_hash(b64_png: str):
     data = base64.b64decode(b64_png)
     img = Image.open(BytesIO(data)).convert("RGB")
@@ -67,22 +83,23 @@ def analyze_tags(nb):
 
     return ignore_paths, image_checks
 
-def inject_silence_stderr_cell(nb):
-    """Insert a code cell to suppress stderr output."""
-    patch_code = """
-    LIVE_REQUEST = False
-    import sys
-    class DevNull:
-        def write(self, msg): pass
-        def flush(self): pass
+# def inject_silence_stderr_cell(nb):
+#     """Insert a code cell to suppress stderr output."""
+#     patch_code = """
+#     LIVE_REQUEST = False
+#     import sys
+#     class DevNull:
+#         def write(self, msg): pass
+#         def flush(self): pass
 
-    sys.stderr = DevNull()
-    """
-    silence_cell = nbformat.v4.new_code_cell(source=patch_code)
-    nb.cells.insert(0, silence_cell)
+#     sys.stderr = DevNull()
+#     """
+#     silence_cell = nbformat.v4.new_code_cell(source=patch_code)
+#     nb.cells.insert(0, silence_cell)
     
-def compare_images(nb1, nb2, checks1, checks2, threshold=5):
+def compare_images(nb1, nb2, checks1, checks2, threshold=1):
     paths_to_remove = []
+    # import pdb; pdb.set_trace()
 
     for (cell_idx, out_idx1), (_, out_idx2) in zip(checks1, checks2):
         png1 = nb1.cells[cell_idx].outputs[out_idx1].data["image/png"]
@@ -104,14 +121,13 @@ def inject_variable_override_cell(nb, variable, value):
 
 
 def get_reference_nb_from_repo(notebook_path, branch="master"):
-    raw_url = f"https://raw.githubusercontent.com/alicemont1/test/{branch}/{notebook_path}"
+    raw_url = f"{REPO_URL}/{branch}/{notebook_path}"
     
     response = requests.get(raw_url)
     response.raise_for_status()  # Raises error if file not found or repo unreachable
 
     reference_nb_obj = nbformat.reads(response.text, as_version=4)
     return reference_nb_obj
-
 
 
 def execute_notebook(nb_object, working_dir):

@@ -14,7 +14,7 @@ from notebook_tester.utils.tag_utils import analyze_tags
 
 @pytest.mark.parametrize("test_nb", get_modified_notebooks() if TEST_MODIFIED_NOTEBOOKS else NOTEBOOKS)
 def test_notebook_vs_baseline(test_nb):
-    parts = test_nb.split('/', 2)  # Split into at most 3 parts
+    parts = test_nb.split('/', 2)
     cleaned_path = parts[2] if len(parts) > 2 else test_nb
     notebook_path = f"{SUBMODULE_PATH}/{cleaned_path}"
 

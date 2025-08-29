@@ -20,3 +20,16 @@ def execute_notebook(nb_object):
     ep = ExecutePreprocessor(timeout=600, kernel_name="python3")
     ep.preprocess(nb_object, {"metadata": {"path": '.'}})
     return nb_object
+
+def inject_silence_stderr_cell(nb):
+    """Insert a code cell to suppress stderr output."""
+    patch_code = """
+    import sys
+    class DevNull:
+        def write(self, msg): pass
+        def flush(self): pass
+
+    sys.stderr = DevNull()
+    """
+    silence_cell = nbformat.v4.new_code_cell(source=patch_code)
+    nb.cells.insert(0, silence_cell)

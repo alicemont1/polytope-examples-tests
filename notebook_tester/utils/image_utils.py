@@ -10,31 +10,18 @@ def perceptual_hash(b64_png: str):
     img = Image.open(BytesIO(data)).convert("RGB")
     return imagehash.phash(img)
 
-def compare_images(nb1, nb2, checks1, checks2):
+def compare_images(nb1, nb2, checks1, checks2, threshold=IMG_COMPARE_THRESHOLD):
     paths_to_remove = []
 
-    for (cell_idx1, out_idx1), (cell_idx2, out_idx2) in zip(checks1, checks2):
-        try:
-            # Get image data from first notebook
-            png1 = nb1.cells[cell_idx1].outputs[out_idx1].data.get("image/png")
-            if png1 is None:
-                continue
+    for (cell_idx, out_idx1), (_, out_idx2) in zip(checks1, checks2):
+        png1 = nb1.cells[cell_idx].outputs[out_idx1].data["image/png"]
+        png2 = nb2.cells[cell_idx].outputs[out_idx2].data["image/png"]
 
-            # Get image data from second notebook
-            png2 = nb2.cells[cell_idx2].outputs[out_idx2].data.get("image/png")
-            if png2 is None:
-                continue
+        png1 = "".join(png1) if isinstance(png1, list) else png1
+        png2 = "".join(png2) if isinstance(png2, list) else png2
 
-            # Join lines if image is stored as list of strings
-            png1 = "".join(png1) if isinstance(png1, list) else png1
-            png2 = "".join(png2) if isinstance(png2, list) else png2
-
-            # Compare perceptual hash difference
-            if perceptual_hash(png1) - perceptual_hash(png2) <= IMG_COMPARE_THRESHOLD:
-                paths_to_remove.append(f"/cells/{cell_idx1}/outputs/{out_idx1}/data/image/png")
-
-        except (IndexError, AttributeError, KeyError):
-            # If any index is invalid or output structure is unexpected, skip
-            continue
+        if perceptual_hash(png1) - perceptual_hash(png2) <= threshold:
+            paths_to_remove.append(f"/cells/{cell_idx}/outputs/{out_idx1}/data/image/png")
+            paths_to_remove.append(f"/cells/{cell_idx}/outputs/{out_idx2}/data/image/png")
 
     return paths_to_remove
